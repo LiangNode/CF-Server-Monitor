@@ -118,3 +118,19 @@ export function formatHistoryTimeKey(timestamp) {
     padHistoryTimePart(date.getUTCSeconds())
   ].join(''));
 }
+
+export function normalizeHistoryPartitionId(value) {
+  const partitionId = Number(value);
+  if (!Number.isInteger(partitionId) || partitionId <= 0 || partitionId > HISTORY_MAX_PARTITION_ID) {
+    return null;
+  }
+  return partitionId;
+}
+
+export function buildHistoryId(partitionId, timestamp) {
+  const normalizedPartitionId = normalizeHistoryPartitionId(partitionId);
+  if (!normalizedPartitionId) {
+    throw new Error('Invalid history partition id');
+  }
+  return normalizedPartitionId * 10000000000000 + formatHistoryTimeKey(timestamp);
+}

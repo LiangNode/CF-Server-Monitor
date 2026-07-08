@@ -1,5 +1,5 @@
 import { saveMetricsHistory } from '../database/schema.js';
-import { checkServerExists } from '../utils/cache.js';
+import { getServerDetail } from '../utils/cache.js';
 import { mergeMetricsIntoServer } from '../utils/metrics.js';
 import { createErrorResponse, createUnauthorizedResponse, createNotFoundResponse, createBadRequestResponse } from '../utils/errors.js';
 
@@ -131,10 +131,16 @@ export async function handleUpdate(request, env, ctx) {
 
     let regionCode = request.cf?.country || request.headers?.get('cf-ipcountry') || '';
 
-    const serverExists = await checkServerExists(env.DB, id);
+    const serverDetail = await getServerDetail(env.DB, id);
 
-    if (!serverExists) {
+    if (!serverDetail) {
       return createNotFoundResponse('Server not found');
+    }
+
+    // 从缓存中获取历史记录分区 ID
+    const historyPartitionId = serverDetail.history_partition_id;
+    if(!historyPartitionId) {
+      return createBadRequestResponse('Missing history_partition_id');
     }
 
     const samples = normalizeMetricSamples(data);
@@ -142,8 +148,9 @@ export async function handleUpdate(request, env, ctx) {
       return createBadRequestResponse('Missing metrics');
     }
 
+    // 获取最后一条插入（如果是批量数据，取最后一个样本）
     const latestSample = samples[samples.length - 1];
-    await saveMetricsHistory(env.DB, id, latestSample.metrics, regionCode, latestSample.ts);
+    await saveMetricsHistory(env.DB, id, historyPartitionId, latestSample.metrics, regionCode, latestSample.ts);
 
     const broadcastSamples = toBroadcastSamples(id, samples, regionCode);
     // 加入批量队列，由后台定时任务统一推送到 DO

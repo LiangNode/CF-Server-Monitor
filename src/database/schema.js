@@ -7,7 +7,7 @@ import {
   getCacheDuration
 } from '../utils/cache.js';
 import { saveSiteOptions, debug, getSettingByKey } from '../utils/settings.js';
-import { ensureServerOptimization } from './indexOptimization.js';
+import { ensureServerOptimization, buildHistoryId } from './indexOptimization.js';
 import { addHistoryColumns, ensureHistoryIndex } from './updateDatabase.js';
 
 let dbInitialized = false;
@@ -315,8 +315,9 @@ export async function weeklyCleanup(db) {
   }
 }
 
-export async function saveMetricsHistory(db, serverId, metrics, regionCode = '', timestamp = null) {
+export async function saveMetricsHistory(db, serverId, historyPartitionId, metrics, regionCode = '', timestamp = null) {
   try {
+    const historyId = buildHistoryId(historyPartitionId, timestamp);
     const rawTimestamp = Number(timestamp);
     const now = Number.isFinite(rawTimestamp) && rawTimestamp > 0
       ? (rawTimestamp < 10000000000 ? rawTimestamp * 1000 : rawTimestamp)
@@ -337,7 +338,7 @@ export async function saveMetricsHistory(db, serverId, metrics, regionCode = '',
     
     await db.prepare(`
       INSERT INTO metrics_history (
-        server_id, timestamp, cpu, load_avg,
+        id, server_id, timestamp, cpu, load_avg,
         net_in_speed, net_out_speed, net_rx, net_tx,
         processes, tcp_conn, udp_conn,
         ping_ct, ping_cu, ping_cm, ping_bd,
@@ -347,7 +348,7 @@ export async function saveMetricsHistory(db, serverId, metrics, regionCode = '',
         cpu_cores, cpu_info, gpu, gpu_info, arch, os, region, ip_v4, ip_v6, boot_time,
         net_rx_monthly, net_tx_monthly
       ) VALUES (
-        ?, ?, ?, ?,
+        ?,?, ?, ?, ?,
         ?, ?, ?, ?,
         ?, ?, ?,
         ?, ?, ?, ?,
@@ -358,6 +359,7 @@ export async function saveMetricsHistory(db, serverId, metrics, regionCode = '',
         ?, ?
       )
     `).bind(
+      historyId,
       serverId,
       now,
       parseFloat(metrics.cpu) || 0,
