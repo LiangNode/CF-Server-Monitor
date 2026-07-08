@@ -1,8 +1,8 @@
 待办事项：
-- [ ] 上报后，插入新的history_partition_id字段
-- [ ] 保证metrics_history表是优化状态
-- [ ] settings新增history_id_optimized字段，如果已优化，自动改成true，其他全局调用判断是否优化，走缓存和清除缓存
-- [ ] 离线通知等检查走新的主键查询
+- [x] 上报后，插入新的history_partition_id字段
+- [x] 保证metrics_history表是优化状态
+- [x] settings新增history_id_optimized字段，如果已优化，自动改成true，其他全局调用判断是否优化，走缓存和清除缓存
+- [x] 离线通知等检查走新的主键查询
 - [x] getNextServerHistoryPartitionId函数，从缓存获取servers表
 - [x] 保证servers表是优化状态
 - [x] 新增server的时候，添加history_partition_id字段

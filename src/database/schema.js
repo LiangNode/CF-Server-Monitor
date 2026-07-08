@@ -482,16 +482,35 @@ export async function getLatestMetrics(db, serverId, server = null) {
       throw new Error('Invalid history partition id');
     }
 
+    let useServerIdFilter = false;
+    const history_id_optimized = await getSettingByKey(db, 'history_id_optimized', true);
+
+    if(!history_id_optimized) {
+      const index = await db.prepare(
+        `SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='metrics_history'`
+      ).first();
+      if(index) {
+        useServerIdFilter = true;
+      }
+    }
+
     const rangeStart = historyInfo.startTimestamp > 0 ? historyInfo.startTimestamp : null;
     const { startId, endId } = getHistoryIdRange(historyInfo.partitionId, rangeStart);
     debug(`Server ${serverId} history_id_range: ${startId} - ${endId}`);
-    const  result = await db.prepare(`
-      SELECT * FROM metrics_history
-      WHERE id >= ?
-        AND id <= ?
-      ORDER BY id DESC
-      LIMIT 1
-    `).bind(startId, endId).first();
+  
+    const result = useServerIdFilter ? await db.prepare(`
+        SELECT * FROM metrics_history
+        WHERE server_id = ?
+        ORDER BY timestamp DESC
+        LIMIT 1
+      `).bind(startId, endId, serverId).first()
+      : await db.prepare(`
+        SELECT * FROM metrics_history
+        WHERE id >= ?
+          AND id <= ?
+        ORDER BY id DESC
+        LIMIT 1
+      `).bind(startId, endId).first();
     return result || null;
   } catch (e) {
     console.error('获取最新指标数据失败:', e);
