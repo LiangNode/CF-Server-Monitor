@@ -151,6 +151,14 @@ install_deps() {
 
     info "基础依赖组件检查通过（bash/coreutils/procps/iproute2/curl）"
 
+    # 检查 tcping（可选，用于更准确的丢包率测量）
+    if ! command -v tcping >/dev/null 2>&1; then
+        warn "未检测到 tcping 命令，丢包率将使用 nc 测量（如不可用则返回空值）"
+        warn "如需更准确的 TCP 层丢包率测量，请手动安装 tcping"
+    else
+        info "tcping 已安装，将使用 tcping 测量丢包率"
+    fi
+
     # 提示 init 情况
     case "$INIT_SYSTEM" in
         openrc)  info "检测到 OpenRC，将注册为系统服务。" ;;
@@ -271,7 +279,7 @@ done < "${CONFIG_FILE}"
 
 COLLECT_INTERVAL=${COLLECT_INTERVAL:-0}
 REPORT_INTERVAL=${REPORT_INTERVAL:-60}
-PING_TYPE=${PING_TYPE:-http}
+PING_TYPE=${PING_TYPE:-tcp}
 [ -z "$RESET_DAY" ] && RESET_DAY=1
 case "$COLLECT_INTERVAL" in ''|*[!0-9]*) COLLECT_INTERVAL=0 ;; esac
 case "$REPORT_INTERVAL" in ''|*[!0-9]*) REPORT_INTERVAL=60 ;; esac
@@ -653,13 +661,22 @@ get_gpu_metrics() {
 }
 
 get_http_ping() { 
-    local rtt
-    rtt=$(curl -I -o /dev/null -s -m 3 --connect-timeout 2 -w "%{time_total}" "http://${1:-}" 2>/dev/null | awk '{printf "%.0f", $1*1000}')
-    if [ -n "$rtt" ] && [ "$rtt" -gt 0 ] 2>/dev/null; then
-        echo "$rtt"
-    else
-        echo ""
-    fi
+    local url="$1" 
+    local rtt 
+
+    [ -z "$url" ] && return 
+
+    rtt=$(curl \ 
+        -I \ 
+        -o /dev/null \ 
+        -s \ 
+        -m 5 \ 
+        --connect-timeout 3 \ 
+        -w "%{time_total}" \ 
+        "http://${url}" 2>/dev/null | 
+        awk '{printf "%.0f",$1*1000}') 
+
+    [ "$rtt" -gt 0 ] 2>/dev/null && echo "$rtt" 
 }
 
 get_time_ms() {
@@ -704,59 +721,6 @@ get_tcp_ping_nc() {
     return 1
 }
 
-parse_curl_connect_ms() {
-    local timing="${1:-}"
-    awk -v t="${timing}" 'BEGIN{
-        split(t, a, " ")
-        dns = a[1] + 0
-        conn = a[2] + 0
-        if (conn <= 0 || conn < dns) {
-            print ""
-            exit
-        }
-        ms = int((conn - dns) * 1000 + 0.5)
-        if (ms < 1) ms = 1
-        print ms
-    }'
-}
-
-get_tcp_ping_curl_tcp() {
-    local host="${1:-}"
-    local port="${2:-443}"
-    local timing
-
-    if [ -z "${host}" ]; then
-        echo ""
-        return
-    fi
-
-    timing=$(curl -o /dev/null -s \
-        --connect-timeout 2 \
-        --max-time 2 \
-        -w "%{time_namelookup} %{time_connect}" \
-        "telnet://${host}:${port}" < /dev/null 2>/dev/null || true)
-
-    parse_curl_connect_ms "${timing}"
-}
-
-get_tcp_ping_curl_http_fallback() {
-    local host="${1:-}"
-    local port="${2:-443}"
-    local scheme="http"
-    local timing
-
-    [ -z "${host}" ] && { echo ""; return; }
-    [ "${port}" = "443" ] && scheme="https"
-
-    timing=$(curl -I -k -o /dev/null -s \
-        --connect-timeout 2 \
-        --max-time 3 \
-        -w "%{time_namelookup} %{time_connect}" \
-        "${scheme}://${host}:${port}/" 2>/dev/null || true)
-
-    parse_curl_connect_ms "${timing}"
-}
-
 get_tcp_ping() {
     local host="${1:-}"
     local port="${2:-443}"
@@ -767,25 +731,24 @@ get_tcp_ping() {
         return
     fi
 
+    if command -v tcping >/dev/null 2>&1; then
+        rtt=$(tcping -c 1 "${host}" "${port}" 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i~/ms$/){v=$i;gsub(/[^0-9.]/,"",v);if(v>0){print int(v+0.5);exit}}}')
+        [ -n "${rtt}" ] && [ "${rtt}" -gt 0 ] 2>/dev/null && { echo "${rtt}"; return; }
+    fi
+
     if has_nc_zero_io && get_time_ms >/dev/null 2>&1; then
         get_tcp_ping_nc "${host}" "${port}" || echo ""
         return
     fi
 
-    rtt=$(get_tcp_ping_curl_tcp "${host}" "${port}")
-    if [ -n "${rtt}" ]; then
-        echo "${rtt}"
-        return
-    fi
-
-    get_tcp_ping_curl_http_fallback "${host}" "${port}"
+    echo ""
 }
 
 get_ping() {
     local host="$1"
     local port="${2:-443}"
     
-    if [ "${PING_TYPE}" = "tcp" ]; then
+    if [ "${PING_TYPE:-tcp}" = "tcp" ]; then
         get_tcp_ping "$host" "$port"
     else
         get_http_ping "$host"
@@ -795,30 +758,30 @@ get_ping() {
 get_packet_loss() {
     local host="${1:-}"
     local count="${2:-4}"
+    local port="${3:-443}"
 
     if [ -z "$host" ]; then
         echo ""
         return
     fi
 
-    # 优先使用 ICMP ping 测量真实丢包率
-    if command -v ping >/dev/null 2>&1; then
-        local received
-        received=$(ping -c "$count" -W 2 "$host" 2>/dev/null | grep -c "icmp_seq")
-        echo $(( (count - received) * 100 / count ))
+    if command -v tcping >/dev/null 2>&1; then
+        loss=$(tcping -c "$count" "$host" "$port" 2>/dev/null | awk -v cnt="$count" '{for(i=1;i<=NF;i++) if($i~/failed/){v=$(i-1);gsub(/[^0-9]/,"",v);if(v>=0){print int(v*100/cnt);exit}}}')
+        [ -n "$loss" ] && [ "$loss" -ge 0 ] 2>/dev/null && { echo "$loss"; return; }
+    fi
+
+    if has_nc_zero_io && get_time_ms >/dev/null 2>&1; then
+        local ok=0
+        local i=1
+        while [ "$i" -le "$count" ]; do
+            get_tcp_ping_nc "$host" "$port" >/dev/null 2>&1 && ok=$((ok + 1))
+            i=$((i + 1))
+        done
+        echo $(( (count - ok) * 100 / count ))
         return
     fi
 
-    # fallback: HTTP/TCP 连通性检测
-    local ok=0
-    local i=1
-    while [ "$i" -le "$count" ]; do
-        if get_ping "$host" 2>/dev/null | grep -qE '^[0-9]+$'; then
-            ok=$((ok + 1))
-        fi
-        i=$((i + 1))
-    done
-    echo $(( (count - ok) * 100 / count ))
+    echo ""
 }
 
 CT_NODE="${CT_NODE:-}"
@@ -1251,7 +1214,7 @@ install_probe() {
         if [ -n "${SERVER_ID}" ] && [ -n "${SECRET}" ] && [ -n "${WORKER_URL}" ]; then
             COLLECT_INTERVAL=${COLLECT_INTERVAL:-0}
             REPORT_INTERVAL=${REPORT_INTERVAL:-60}
-            PING_TYPE=${PING_TYPE:-http}
+            PING_TYPE=${PING_TYPE:-tcp}
             [ -z "$RESET_DAY" ] && RESET_DAY=1
             
             step "更新配置文件..."
@@ -1298,7 +1261,7 @@ EOF
                 SECRET="${OLD_SECRET}"
                 WORKER_URL="${OLD_WORKER_URL}"
                 REPORT_INTERVAL="${OLD_REPORT_INTERVAL:-60}"
-                PING_TYPE="${OLD_PING_TYPE:-http}"
+                PING_TYPE="${OLD_PING_TYPE:-tcp}"
                 CT_NODE="${OLD_CT_NODE:-}"
                 CU_NODE="${OLD_CU_NODE:-}"
                 CM_NODE="${OLD_CM_NODE:-}"
@@ -1312,7 +1275,7 @@ EOF
 
         COLLECT_INTERVAL=${COLLECT_INTERVAL:-0}
         REPORT_INTERVAL=${REPORT_INTERVAL:-60}
-        PING_TYPE=${PING_TYPE:-http}
+        PING_TYPE=${PING_TYPE:-tcp}
         [ -z "$RESET_DAY" ] && RESET_DAY=1
 
         step "创建配置目录..."
